@@ -27,6 +27,7 @@ class ImageDataset(Dataset):
         self.root_dir = root_dir
         self.is_test = is_test
         self.cfg = cfg
+        self.transform = transform
         
         # 检查目录是否存在
         if not os.path.exists(root_dir):
@@ -42,6 +43,9 @@ class ImageDataset(Dataset):
             self.df = csv_file
         else:
             raise ValueError("csv_file必须是字符串路径或DataFrame")
+        
+        # 确保id列为整数类型
+        self.df['id'] = self.df['id'].astype(int).astype(str)  # 直接转换为字符串
             
         logging.info(f"数据集大小: {len(self.df)} 样本")
         
@@ -49,89 +53,77 @@ class ImageDataset(Dataset):
         required_columns = ['id'] if is_test else ['id', 'target']
         missing_columns = [col for col in required_columns if col not in self.df.columns]
         if missing_columns:
-            raise ValueError(f"数据缺少必要的列: {missing_columns}")
+            raise ValueError(f"CSV文件缺少必要的列: {missing_columns}")
         
-        # 确保target列的值在合法范围内
         if not is_test:
-            if self.df['target'].max() >= cfg.num_classes or self.df['target'].min() < 0:
-                raise ValueError(f"标签值超出范围[0, {cfg.num_classes-1}]")
-        
-        # 计算类别权重
-        if not is_test:
-            class_counts = self.df['target'].value_counts()
-            total_samples = len(self.df)
-            self.class_weights = torch.FloatTensor([
-                total_samples / (len(class_counts) * count) 
-                for count in class_counts
-            ])
-        
-        # 数据增强
-        if not is_test:
-            self.transform = A.Compose([
-                A.RandomResizedCrop(
-                    height=cfg.image_size[0],
-                    width=cfg.image_size[1],
-                    scale=cfg.aug_scale
-                ),
-                A.HorizontalFlip(p=0.5),
-                A.ShiftScaleRotate(
-                    shift_limit=0.1,
-                    scale_limit=0.2,
-                    rotate_limit=cfg.aug_rotate,
-                    p=0.5
-                ),
-                A.OneOf([
-                    A.GaussNoise(p=1),
-                    A.GaussianBlur(p=1),
-                    A.MotionBlur(p=1),
-                ], p=0.3),
-                A.ColorJitter(
-                    brightness=cfg.aug_brightness,
-                    contrast=cfg.aug_contrast,
-                    saturation=0.3,
-                    hue=0.2,
-                    p=0.5
-                ),
-                A.Normalize(),
-                ToTensorV2()
-            ])
-        else:
-            self.transform = A.Compose([
-                A.Resize(
-                    height=cfg.image_size[0],
-                    width=cfg.image_size[1]
-                ),
-                A.Normalize(),
-                ToTensorV2()
-            ])
+            # 检查标签范围
+            if 'target' in self.df.columns:
+                unique_labels = self.df['target'].unique()
+                logging.info(f"数据集中的唯一标签: {sorted(unique_labels)}")
+                if cfg and hasattr(cfg, 'num_classes'):
+                    invalid_labels = [label for label in unique_labels 
+                                    if label < 0 or label >= cfg.num_classes]
+                    if invalid_labels:
+                        raise ValueError(f"发现无效的标签值: {invalid_labels}")
     
     def __len__(self):
         return len(self.df)
     
     def __getitem__(self, idx):
-        img_name = os.path.join(self.root_dir, f"{self.df.iloc[idx]['id']}.jpg")
+        img_name = self.df.iloc[idx]['id']  # 已经是字符串了
+        
+        # 尝试不同的图片扩展名
+        img_extensions = ['.jpg', '.jpeg', '.png']
+        img_path = None
+        
+        for ext in img_extensions:
+            temp_path = os.path.join(self.root_dir, f"{img_name}{ext}")
+            if os.path.exists(temp_path):
+                img_path = temp_path
+                break
+        
+        if img_path is None:
+            logging.error(f"找不到图片文件: {img_name} (尝试过的扩展名: {img_extensions})")
+            # 创建一个随机的替代图像
+            random_image = np.random.randint(0, 255, size=(*self.cfg.image_size, 3), dtype=np.uint8)
+            if self.transform:
+                transformed = self.transform(image=random_image)
+                random_image = transformed["image"]
+            if self.is_test:
+                return random_image, img_name  # 返回图像和图像名
+            else:
+                label = self.df.iloc[idx]['target']
+                return random_image, label
         
         try:
-            image = cv2.imread(img_name)
+            # 使用cv2读取图像
+            image = cv2.imread(img_path)
             if image is None:
-                raise ValueError(f"无法读取图像: {img_name}")
+                raise ValueError(f"无法读取图像: {img_path}")
+            
+            # 转换BGR到RGB
             image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            
+            # 应用变换
+            if self.transform:
+                transformed = self.transform(image=image)
+                image = transformed["image"]
+            
+            if self.is_test:
+                return image, img_name  # 返回图像和图像名
+            else:
+                label = self.df.iloc[idx]['target']
+                return image, label
+                
         except Exception as e:
-            logging.error(f"读取图像出错 {img_name}: {str(e)}")
-            # 返回一个随机噪声图像作为替代
-            image = np.random.randint(0, 255, size=(*self.cfg.image_size, 3), dtype=np.uint8)
-        
-        if self.transform:
-            try:
-                augmented = self.transform(image=image)
-                image = augmented['image']
-            except Exception as e:
-                logging.error(f"数据增强出错 {img_name}: {str(e)}")
-                # 返回原始图像转换为张量
-                image = torch.from_numpy(image.transpose(2, 0, 1)) / 255.0
-        
-        if self.is_test:
-            return image, self.df.iloc[idx]['id']
-        else:
-            label = self.df.iloc[idx]['target']
-            return image, label
+            logging.error(f"处理图像时出错 {img_path}: {str(e)}")
+            # 返回随机图像作为替代
+            random_image = np.random.randint(0, 255, size=(*self.cfg.image_size, 3), dtype=np.uint8)
+            if self.transform:
+                transformed = self.transform(image=random_image)
+                random_image = transformed["image"]
+            if self.is_test:
+                return random_image, img_name  # 返回图像和图像名
+            else:
+                label = self.df.iloc[idx]['target']
+                return random_image, label
