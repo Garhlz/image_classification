@@ -4,8 +4,13 @@ import numpy as np
 from PIL import Image
 import torch
 from torch.utils.data import Dataset
-from torchvision import transforms
 import logging
+import random
+from timm.data.auto_augment import rand_augment_transform
+from timm.data.mixup import Mixup
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
+import cv2
 
 # 配置日志
 logging.basicConfig(
@@ -18,154 +23,115 @@ logging.basicConfig(
 )
 
 class ImageDataset(Dataset):
-    """
-    图像分类数据集类
-    支持训练集和测试集的数据加载，包含数据增强和类别平衡
-    """
-    
-    def __init__(self, root_dir, csv_file, transform=None, is_test=False):
-        """
-        初始化数据集
-        
-        Args:
-            root_dir (str): 图片根目录
-            csv_file (str): CSV文件路径
-            transform (callable, optional): 数据转换
-            is_test (bool): 是否为测试集
-        """
+    def __init__(self, root_dir, csv_file, transform=None, is_test=False, cfg=None):
         self.root_dir = root_dir
         self.is_test = is_test
+        self.cfg = cfg
         
         # 检查目录是否存在
         if not os.path.exists(root_dir):
             raise ValueError(f"目录不存在: {root_dir}")
         
-        # 读取CSV文件
-        logging.info(f"正在读取CSV文件: {csv_file}")
-        if not os.path.exists(csv_file):
-            raise ValueError(f"CSV文件不存在: {csv_file}")
+        # 读取CSV文件或直接使用DataFrame
+        logging.info("正在加载数据...")
+        if isinstance(csv_file, str):
+            if not os.path.exists(csv_file):
+                raise ValueError(f"CSV文件不存在: {csv_file}")
+            self.df = pd.read_csv(csv_file)
+        elif isinstance(csv_file, pd.DataFrame):
+            self.df = csv_file
+        else:
+            raise ValueError("csv_file必须是字符串路径或DataFrame")
             
-        self.df = pd.read_csv(csv_file)
         logging.info(f"数据集大小: {len(self.df)} 样本")
         
         # 验证CSV文件格式
         required_columns = ['id'] if is_test else ['id', 'target']
         missing_columns = [col for col in required_columns if col not in self.df.columns]
         if missing_columns:
-            raise ValueError(f"CSV文件缺少必要的列: {missing_columns}")
+            raise ValueError(f"数据缺少必要的列: {missing_columns}")
         
-        # 默认数据增强
-        train_transform = transforms.Compose([
-            transforms.Resize((60, 80)),
-            transforms.RandomHorizontalFlip(),
-            transforms.RandomRotation(10),
-            transforms.ColorJitter(brightness=0.2, contrast=0.2),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                               std=[0.229, 0.224, 0.225])
-        ])
-        
-        test_transform = transforms.Compose([
-            transforms.Resize((60, 80)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                               std=[0.229, 0.224, 0.225])
-        ])
-        
-        self.transform = transform if transform else (test_transform if is_test else train_transform)
-        
+        # 确保target列的值在合法范围内
         if not is_test:
-            self.labels = self.df['target'].values
-            # 验证标签值的范围
-            unique_labels = np.unique(self.labels)
-            if len(unique_labels) > 44 or np.min(self.labels) < 0:
-                raise ValueError("标签值超出预期范围")
-            # 计算并记录类别分布
-            self._log_class_distribution()
-            # 计算类别权重
-            self.class_weights = self._calculate_class_weights()
-            logging.info("类别权重计算完成")
-            
-        # 预先检查所有图片文件是否存在
-        self._verify_images()
-    
-    def _verify_images(self):
-        """验证所有图片文件是否存在"""
-        missing_images = []
-        for idx in range(len(self.df)):
-            img_name = f"{self.df['id'].iloc[idx]}.jpg"
-            img_path = os.path.join(self.root_dir, img_name)
-            if not os.path.exists(img_path):
-                missing_images.append(img_path)
+            if self.df['target'].max() >= cfg.num_classes or self.df['target'].min() < 0:
+                raise ValueError(f"标签值超出范围[0, {cfg.num_classes-1}]")
         
-        if missing_images:
-            logging.error(f"发现 {len(missing_images)} 个缺失的图片文件")
-            for path in missing_images[:10]:  # 只显示前10个
-                logging.error(f"缺失文件: {path}")
-            if len(missing_images) > 10:
-                logging.error("...")
-            raise FileNotFoundError(f"数据集中有 {len(missing_images)} 个缺失的图片文件")
-    
-    def _log_class_distribution(self):
-        """记录数据集的类别分布情况"""
-        class_counts = self.df['target'].value_counts().sort_index()
-        logging.info("\n类别分布情况:")
-        logging.info(f"类别数量: {len(class_counts)}")
-        logging.info(f"平均样本数: {class_counts.mean():.2f}")
-        logging.info(f"最大样本数: {class_counts.max()}")
-        logging.info(f"最小样本数: {class_counts.min()}")
-        logging.info(f"标准差: {class_counts.std():.2f}")
-    
-    def _calculate_class_weights(self):
-        """
-        计算类别权重
-        使用逆频率作为权重，并进行归一化
-        """
-        class_counts = self.df['target'].value_counts().sort_index()
-        weights = 1.0 / class_counts
-        weights = weights / weights.sum() * len(class_counts)
-        return torch.FloatTensor(weights)
+        # 计算类别权重
+        if not is_test:
+            class_counts = self.df['target'].value_counts()
+            total_samples = len(self.df)
+            self.class_weights = torch.FloatTensor([
+                total_samples / (len(class_counts) * count) 
+                for count in class_counts
+            ])
+        
+        # 数据增强
+        if not is_test:
+            self.transform = A.Compose([
+                A.RandomResizedCrop(
+                    height=cfg.image_size[0],
+                    width=cfg.image_size[1],
+                    scale=cfg.aug_scale
+                ),
+                A.HorizontalFlip(p=0.5),
+                A.ShiftScaleRotate(
+                    shift_limit=0.1,
+                    scale_limit=0.2,
+                    rotate_limit=cfg.aug_rotate,
+                    p=0.5
+                ),
+                A.OneOf([
+                    A.GaussNoise(p=1),
+                    A.GaussianBlur(p=1),
+                    A.MotionBlur(p=1),
+                ], p=0.3),
+                A.ColorJitter(
+                    brightness=cfg.aug_brightness,
+                    contrast=cfg.aug_contrast,
+                    saturation=0.3,
+                    hue=0.2,
+                    p=0.5
+                ),
+                A.Normalize(),
+                ToTensorV2()
+            ])
+        else:
+            self.transform = A.Compose([
+                A.Resize(
+                    height=cfg.image_size[0],
+                    width=cfg.image_size[1]
+                ),
+                A.Normalize(),
+                ToTensorV2()
+            ])
     
     def __len__(self):
         return len(self.df)
     
     def __getitem__(self, idx):
-        """
-        获取数据集中的一个样本
+        img_name = os.path.join(self.root_dir, f"{self.df.iloc[idx]['id']}.jpg")
         
-        Args:
-            idx (int): 样本索引
-            
-        Returns:
-            tuple: (image, label) 或 (image, image_id)
-        """
         try:
-            # 构建图片路径
-            img_name = f"{self.df['id'].iloc[idx]}.jpg"
-            img_path = os.path.join(self.root_dir, img_name)
-            
-            # 读取并转换图片
-            try:
-                image = Image.open(img_path).convert('RGB')
-            except Exception as e:
-                logging.error(f"读取图片失败: {img_path}")
-                logging.error(f"错误信息: {str(e)}")
-                raise
-            
-            # 应用数据转换
-            try:
-                image = self.transform(image)
-            except Exception as e:
-                logging.error(f"转换图片失败: {img_path}")
-                logging.error(f"错误信息: {str(e)}")
-                raise
-            
-            if self.is_test:
-                return image, self.df['id'].iloc[idx]
-            else:
-                return image, self.labels[idx]
-                
+            image = cv2.imread(img_name)
+            if image is None:
+                raise ValueError(f"无法读取图像: {img_name}")
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         except Exception as e:
-            logging.error(f"处理样本失败，索引: {idx}")
-            logging.error(f"错误信息: {str(e)}")
-            raise
+            logging.error(f"读取图像出错 {img_name}: {str(e)}")
+            # 返回一个随机噪声图像作为替代
+            image = np.random.randint(0, 255, size=(*self.cfg.image_size, 3), dtype=np.uint8)
+        
+        if self.transform:
+            try:
+                augmented = self.transform(image=image)
+                image = augmented['image']
+            except Exception as e:
+                logging.error(f"数据增强出错 {img_name}: {str(e)}")
+                # 返回原始图像转换为张量
+                image = torch.from_numpy(image.transpose(2, 0, 1)) / 255.0
+        
+        if self.is_test:
+            return image, self.df.iloc[idx]['id']
+        else:
+            label = self.df.iloc[idx]['target']
+            return image, label
