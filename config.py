@@ -4,42 +4,49 @@ class Config:
     test_dir = 'C:/code_in_laptop/d2l-zh/lab5/data/test'   
     train_csv = 'C:/code_in_laptop/d2l-zh/lab5/data/train.csv'  
     test_csv = 'C:/code_in_laptop/d2l-zh/lab5/data/sample_submission.csv'   
-    submission_path = './submission.csv'  # 预测结果保存路径
+    submission_path = './submission.csv'  
+    num_classes = 44                
+    
+    # 图像配置
+    image_size = (260, 260)       # 使用更大的输入尺寸
+    progressive_resizing = False   # 关闭渐进式尺寸调整
+    
+    # 数据增强配置
+    random_erasing_prob = 0.3    # 随机擦除概率
+    mixup_alpha = 0.2           # MixUp增强参数
+    cutmix_alpha = 1.0          # CutMix增强参数
     
     # 模型相关配置
-    model_name = 'efficientnet_b2'  # 使用timm本地模型名称
-    num_classes = 44                
-    image_size = (260, 260)        # EfficientNet-B2推荐输入大小
+    model_name = 'convnext_base'  # 使用ConvNeXt Base模型
+    pretrained = True            # 使用预训练模型
+    use_deep_supervision = True   # 使用深度监督
+    aux_weight = 0.4             # 辅助损失权重
     
     # 训练相关配置
-    batch_size = 48                # 由于模型更大，稍微减小batch_size
-    num_workers = 4                
-    epochs = 15                    # 每折至少15轮
-    lr = 2e-4                      # 稍微降低学习率以适应新模型
-    weight_decay = 1e-2            
+    batch_size = 32              
+    epochs = 20                  
+    num_folds = 3                # 3折交叉验证
+    num_workers = 4              
+    patience = 4                 # 早停轮数
+    label_smoothing = 0.1        # 标签平滑
     
-    # 训练策略
-    use_amp = True                 # 使用混合精度训练
-    gradient_clip_val = 1.0        
-    num_folds = 2                  # 使用2折交叉验证
+    # 优化器配置
+    optimizer = 'AdamW'         
+    lr = 1e-4                   
+    weight_decay = 1e-2         
+    gradient_accumulation_steps = 2  # 梯度累积
     
-    # 早停策略
-    patience = 3                   # 给模型更多机会
+    # 学习率策略
+    use_cosine_schedule = True    # 使用余弦退火
+    warmup_ratio = 0.1           # 预热比例
+    min_lr = 1e-6                # 最小学习率
     
-    # SWA配置
-    swa_start = int(epochs * 0.7)  # 在训练后期开始SWA
-    swa_lr = 1e-5                  
-    
-    # 学习率调度器配置
-    warmup_ratio = 0.1             
-    
-    # 模型保存和加载
-    model_save_path = './models'   
-    pretrained = True              # 使用预训练模型
+    # 高级训练配置
+    use_amp = True               # 混合精度训练
+    use_ema = True               # 指数移动平均
+    ema_decay = 0.9997          
+    gradient_clip_val = 1.0      # 梯度裁剪
     
     # 日志配置
-    log_interval = 20              
-    
-    # 集成配置
-    ensemble_weights = [1.0]       # 单模型权重
-    tta_transforms = 0             # 默认不使用测试时增强
+    log_interval = 100           # 每100个batch记录一次
+    model_save_path = './models'  # 模型保存路径
