@@ -49,4 +49,6 @@ class Config:
     
     # 日志配置
     log_interval = 100           # 每100个batch记录一次
-    model_save_path = './models'  # 模型保存路径
+    # model_save_path = './models'  # 模型保存路径
+    model_save_path = 'C:/code_in_laptop/d2l-zh/image_classification/models'
+

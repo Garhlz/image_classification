@@ -14,7 +14,7 @@ class Config:
     # 训练相关配置
     batch_size = 48                # 由于模型更大，稍微减小batch_size
     num_workers = 4                
-    epochs = 15                    # 每折至少15轮
+    epochs = 20                    # 每折至少15轮
     lr = 2e-4                      # 稍微降低学习率以适应新模型
     weight_decay = 1e-2            
     
